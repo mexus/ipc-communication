@@ -5,8 +5,16 @@
 use crossbeam_utils::thread::scope;
 use ipc_channel::ipc::{channel, IpcReceiver, IpcSender};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ResultExt, Snafu};
-use std::{any::Any, convert::identity, io};
+use snafu::{ensure, OptionExt, ResultExt, Snafu};
+use std::{
+    any::Any,
+    convert::identity,
+    io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 /// Non-constructible helper data type, just like `!`, but works on stable.
 pub enum Never {}
@@ -128,6 +136,14 @@ pub enum Error {
         /// Source IPC error.
         source: ipc_channel::Error,
     },
+
+    /// Unable to send a request because a system has stopped.
+    #[snafu(display("Unable to send a request because a system has stopped"))]
+    StoppedSendingRequest,
+
+    /// Unable to receive a response because a system has stopped.
+    #[snafu(display("Unable to receive a response because a system has stopped"))]
+    StoppedReceivingResponse,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +160,7 @@ enum Message<Request, Response> {
 /// A "client" capable of sending requests to processors.
 pub struct Client<Request, Response> {
     senders: Vec<IpcSender<Message<Request, Response>>>,
+    running: Arc<AtomicBool>,
 }
 
 impl<Request, Response> Clone for Client<Request, Response>
@@ -156,6 +173,7 @@ where
     fn clone(&self) -> Self {
         Client {
             senders: self.senders.clone(),
+            running: Arc::clone(&self.running),
         }
     }
 }
@@ -174,15 +192,19 @@ where
             channel_id,
             channels,
         })?;
-        let (snd, rcv) = channel::<Response>().context(ResponseChannelInit { channel_id })?;
+        let (response_channel, rcv) =
+            channel::<Response>().context(ResponseChannelInit { channel_id })?;
+        ensure!(self.running.load(Ordering::SeqCst), StoppedSendingRequest);
         sender
             .send(Message::Request {
                 request,
-                // We clone the `snd` in order to make sure we won't get
-                // "All senders for this socket closed" error.
-                response_channel: snd.clone(),
+                response_channel,
             })
             .context(SendingRequest { channel_id })?;
+        ensure!(
+            self.running.load(Ordering::SeqCst),
+            StoppedReceivingResponse
+        );
         rcv.recv().context(ReceivingResponse { channel_id })
     }
 
@@ -230,14 +252,15 @@ where
 
 /// Request processors.
 #[must_use = "One must call process requests in order for the communication to run"]
-pub struct Processors<Request, Response>(
+pub struct Processors<Request, Response> {
     /// The underlying processors.
-    pub Vec<Processor<Request, Response>>,
-);
+    pub processors: Vec<Processor<Request, Response>>,
+}
 
 /// Processors handler.
 pub struct ProcessorsHandle<Request, Response> {
     senders: Vec<IpcSender<Message<Request, Response>>>,
+    running: Arc<AtomicBool>,
 }
 
 impl<Request, Response> ProcessorsHandle<Request, Response>
@@ -249,6 +272,7 @@ where
 {
     /// Sends a stop signal to all the running processors and waits for them to receive the signal.
     pub fn stop(self) -> Result<(), Vec<Error>> {
+        self.running.store(false, Ordering::SeqCst);
         let (quit_confirmation, quit_rcv) = channel::<()>()
             .context(QuitChannelInit)
             .map_err(|e| vec![e])?;
@@ -354,7 +378,7 @@ where
     {
         let res = scope(|s| {
             let handlers = self
-                .0
+                .processors
                 .into_iter()
                 .enumerate()
                 .map(|(channel_id, processor)| {
@@ -436,11 +460,16 @@ where
         processors.push(Processor { receiver });
         senders.push(sender);
     }
+    let running = Arc::new(AtomicBool::new(true));
     let handle = ProcessorsHandle {
         senders: senders.clone(),
+        running: Arc::clone(&running),
     };
-    let client = Client { senders };
-    let processors = Processors(processors);
+    let client = Client {
+        senders,
+        running: Arc::clone(&running),
+    };
+    let processors = Processors { processors };
     Ok(Communication {
         client,
         processors,
