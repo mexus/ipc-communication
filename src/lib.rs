@@ -70,7 +70,7 @@ pub enum Error {
         channel_id: usize,
     },
 
-    /// Unable to initialize a quit confirmation channel
+    /// Unable to initialize a quit confirmation channel.
     #[snafu(display("Unable to initialize a quit confirmation channel: {}", source))]
     QuitChannelInit {
         /// Source I/O error,
@@ -143,6 +143,32 @@ pub enum Error {
     /// Unable to receive a response because a system has stopped.
     #[snafu(display("Unable to receive a response because a system has stopped"))]
     StoppedReceivingResponse,
+}
+
+impl Error {
+    /// Checks if the other end has terminated.
+    pub fn has_terminated(&self) -> bool {
+        match self {
+            Error::SendingRequest { source, .. }
+            | Error::ReceivingResponse { source, .. }
+            | Error::ReceivingRequest { source, .. }
+            | Error::SendingResponse { source, .. }
+            | Error::SendingQuitRequest { source, .. }
+            | Error::SendingQuitResponse { source, .. }
+            | Error::ReceivingQuitResponse { source, .. } => {
+                if let ipc_channel::ErrorKind::Io(io) = source as &_ {
+                    io.kind() == std::io::ErrorKind::BrokenPipe
+                } else {
+                    false
+                }
+            }
+            Error::StoppedSendingRequest | Error::StoppedReceivingResponse => true,
+            Error::ChannelsInit { .. }
+            | Error::ChannelNotFound { .. }
+            | Error::ResponseChannelInit { .. }
+            | Error::QuitChannelInit { .. } => false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
