@@ -1,0 +1,28 @@
+[package]
+name = "ipc-communication"
+version = "0.1.0"
+authors = ["mexus"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1", features = [ "derive" ] }
+snafu = "0.6.2"
+
+ipc-channel = "0.13.0"
+crossbeam-utils = "0.7.0"
+
+
+[dev-dependencies]
+rand = "0.7.3"
+rand_xoshiro = "0.4.0"
+criterion = "0.3"
+nix = "0.17.0"
+structopt = "0.3.9"
+rand_distr = "0.2.2"
+humantime = "2.0.0"
+
+[[bench]]
+name = "inter_thread"
+harness = false
