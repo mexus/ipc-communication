@@ -98,8 +98,7 @@ enum Error {
 
     #[snafu(display("IPC processing error(s): {:#?}", source))]
     Processing {
-        #[snafu(source(false))]
-        source: Vec<ipc_communication::ParallelRunError>,
+        source: ipc_communication::ParallelRunError,
     },
 }
 
@@ -148,7 +147,7 @@ fn main() -> Result<(), Error> {
                 vec
             }
         })
-        .map_err(|source| Error::Processing { source })?;
+        .context(Processing)?;
 
     let sent = clients
         .into_iter()
