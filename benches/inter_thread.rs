@@ -7,7 +7,7 @@ use nix::{
 };
 use rand::{distributions::Standard, Rng, SeedableRng};
 use rand_xoshiro::Xoshiro256PlusPlus;
-use std::mem;
+use std::{convert::identity, mem};
 
 fn transformation(request: Vec<u8>) -> usize {
     request.into_iter().map(usize::from).sum()
@@ -23,11 +23,8 @@ fn criterion_benchmark(c: &mut Criterion) {
         handle,
     } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
 
-    let processors = std::thread::spawn(move || {
-        processors
-            .run_in_parallel(|| (), |_, req| transformation(req))
-            .unwrap()
-    });
+    let processors =
+        std::thread::spawn(move || processors.run_in_parallel(|| transformation).unwrap());
 
     const MAX_MESSAGE_LEN: usize = 1024;
     const MESSAGES: usize = 100;
@@ -75,9 +72,8 @@ fn criterion_benchmark(c: &mut Criterion) {
                 handle,
             } = communication::<Vec<u8>, Vec<u8>>(1).unwrap();
 
-            let processors = std::thread::spawn(move || {
-                processors.run_in_parallel(|| (), |_, req| req).unwrap()
-            });
+            let processors =
+                std::thread::spawn(move || processors.run_in_parallel(|| identity).unwrap());
             bencher.iter_batched(
                 || (&mut rng).sample_iter(Standard).take(size).collect(),
                 |vec| client.make_request(0, vec).unwrap(),
@@ -96,7 +92,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             let pid = match fork().unwrap() {
                 ForkResult::Parent { child } => child,
                 ForkResult::Child => {
-                    let _ = processors.run_in_parallel(|| (), |_, req| req).unwrap();
+                    let _ = processors.run_in_parallel(|| identity).unwrap();
                     std::process::exit(0);
                 }
             };
