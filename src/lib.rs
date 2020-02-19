@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{
     any::Any,
-    convert::identity,
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -436,7 +435,10 @@ where
     for<'de> Response: Serialize + Deserialize<'de> + Send,
 {
     /// Runs all the underlying responses in separate thread each using a given closure.
-    pub fn run_in_parallel<S>(self, mut socium: S) -> Result<(), Vec<ParallelRunError>>
+    pub fn run_in_parallel<S>(
+        self,
+        mut socium: S,
+    ) -> Result<Vec<ParallelRunError>, ParallelRunError>
     where
         S: labor::Socium<Request, Response>,
         S::Proletarian: labor::Proletarian<Request, Response> + Send,
@@ -454,8 +456,7 @@ where
                         .spawn(move |_| processor.run_loop(prolet))
                         .context(SpawnError { channel_id })
                 })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| vec![e])?;
+                .collect::<Result<Vec<_>, _>>()?;
             let join_errors: Vec<_> = handlers
                 .into_iter()
                 .map(|handler| {
@@ -475,15 +476,10 @@ where
                     Err(e) => Some(e),
                 })
                 .collect();
-            if join_errors.is_empty() {
-                Ok(())
-            } else {
-                Err(join_errors)
-            }
+            Ok(join_errors)
         })
-        .context(UnjoinedThreadPanic)
-        .map_err(|e| vec![e]);
-        res.and_then(identity)
+        .context(UnjoinedThreadPanic)??;
+        Ok(res)
     }
 }
 
