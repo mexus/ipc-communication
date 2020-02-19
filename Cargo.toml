@@ -1,6 +1,6 @@
 [package]
 name = "ipc-communication"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["mexus"]
 edition = "2018"
 description = "A client-server style convenience wrapper over servo/ipc-channel"

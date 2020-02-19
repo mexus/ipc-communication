@@ -16,9 +16,6 @@ use std::{
     },
 };
 
-/// Non-constructible helper data type, just like `!`, but works on stable.
-pub enum Never {}
-
 mod panic_error;
 pub use panic_error::PanicError;
 
