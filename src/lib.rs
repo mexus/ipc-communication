@@ -148,6 +148,19 @@ pub enum Error {
 impl Error {
     /// Checks if the other end has terminated.
     pub fn has_terminated(&self) -> bool {
+        self.ipc_error()
+            .map(|source| {
+                if let ipc_channel::ErrorKind::Io(io) = source {
+                    io.kind() == std::io::ErrorKind::BrokenPipe
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    /// Returns the underlying `ipc-channel` error, if any.
+    pub fn ipc_error(&self) -> Option<&ipc_channel::ErrorKind> {
         match self {
             Error::SendingRequest { source, .. }
             | Error::ReceivingResponse { source, .. }
@@ -155,18 +168,8 @@ impl Error {
             | Error::SendingResponse { source, .. }
             | Error::SendingQuitRequest { source, .. }
             | Error::SendingQuitResponse { source, .. }
-            | Error::ReceivingQuitResponse { source, .. } => {
-                if let ipc_channel::ErrorKind::Io(io) = source as &_ {
-                    io.kind() == std::io::ErrorKind::BrokenPipe
-                } else {
-                    false
-                }
-            }
-            Error::StoppedSendingRequest | Error::StoppedReceivingResponse => true,
-            Error::ChannelsInit { .. }
-            | Error::ChannelNotFound { .. }
-            | Error::ResponseChannelInit { .. }
-            | Error::QuitChannelInit { .. } => false,
+            | Error::ReceivingQuitResponse { source, .. } => Some(source as &_),
+            _ => None,
         }
     }
 }
