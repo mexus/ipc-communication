@@ -140,14 +140,14 @@ fn main() -> Result<(), Error> {
     });
 
     processors
-        .run_in_parallel(
-            || Xoshiro256PlusPlus::seed_from_u64(rng.gen()),
-            move |rng, vec| {
+        .run_in_parallel(|| {
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(rng.gen());
+            move |vec| {
                 let sleep_for = rng.gen_range(Duration::from_nanos(100), Duration::from_micros(1));
                 sleep(sleep_for);
                 vec
-            },
-        )
+            }
+        })
         .map_err(|source| Error::Processing { source })?;
 
     let sent = clients

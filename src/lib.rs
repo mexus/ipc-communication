@@ -16,7 +16,9 @@ use std::{
     },
 };
 
+pub mod labor;
 mod panic_error;
+
 pub use panic_error::PanicError;
 
 /// IPC communication error.
@@ -216,21 +218,68 @@ pub struct Processor<Request, Response> {
     receiver: IpcReceiver<Message<Request, Response>>,
 }
 
+/// A result returned by a "loafer".
+#[derive(Debug, Clone, Copy)]
+pub enum LoaferResult {
+    /// The caller can block on receiving data, since the loafer has done all it needed.
+    ImDone,
+
+    /// A hint to call the loafer again.
+    CallMeAgain,
+}
+
+fn is_would_block(e: &ipc_channel::Error) -> bool {
+    if let ipc_channel::ErrorKind::Io(io) = &e as &_ {
+        io.kind() == std::io::ErrorKind::WouldBlock
+    } else {
+        false
+    }
+}
+
+fn maybe_message<T>(rcv: &IpcReceiver<T>) -> Result<Option<T>, ipc_channel::Error>
+where
+    for<'de> T: Deserialize<'de> + Serialize,
+{
+    match rcv.try_recv() {
+        Ok(item) => Ok(Some(item)),
+        Err(e) if is_would_block(&e) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 impl<Request, Response> Processor<Request, Response>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
+    for<'de> Request: Serialize + Deserialize<'de>,
+    for<'de> Response: Serialize + Deserialize<'de>,
 {
     /// Runs infinitely, processing incoming request using a given closure and sending generated
     /// responses back to the clients.
-    pub fn run_loop<F>(&self, mut f: F) -> Result<(), Error>
+    ///
+    /// The `loafer` is called every time there are no more messages in the queue.
+    pub fn run_loop<P>(&self, mut proletarian: P) -> Result<(), Error>
     where
-        F: FnMut(Request) -> Response,
+        P: labor::Proletarian<Request, Response>,
     {
+        let mut should_block = false;
         loop {
-            match self.receiver.recv().context(ReceivingRequest)? {
+            let item = if should_block {
+                self.receiver.recv().context(ReceivingRequest)?
+            } else if let Some(item) = maybe_message(&self.receiver).context(ReceivingRequest)? {
+                item
+            } else {
+                match proletarian.loaf() {
+                    labor::LoafingResult::ImDone => {
+                        should_block = true;
+                        continue;
+                    }
+                    labor::LoafingResult::TouchMeAgain => {
+                        should_block = false;
+                        continue;
+                    }
+                }
+            };
+            should_block = false;
+            match item {
                 Message::Quit { response_channel } => {
                     response_channel.send(()).context(SendingQuitResponse)?;
                     break Ok(());
@@ -239,7 +288,7 @@ where
                     request,
                     response_channel,
                 } => {
-                    let response = f(request);
+                    let response = proletarian.process_request(request);
                     response_channel.send(response).context(SendingResponse)?;
                 }
             }
@@ -354,24 +403,14 @@ pub enum ParallelRunError {
 
 impl<Request, Response> Processors<Request, Response>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
-    Request: Send,
-    Response: Send,
+    for<'de> Request: Serialize + Deserialize<'de> + Send,
+    for<'de> Response: Serialize + Deserialize<'de> + Send,
 {
     /// Runs all the underlying responses in separate thread each using a given closure.
-    pub fn run_in_parallel<S, State, F>(
-        self,
-        mut setup: S,
-        f: F,
-    ) -> Result<(), Vec<ParallelRunError>>
+    pub fn run_in_parallel<S>(self, mut socium: S) -> Result<(), Vec<ParallelRunError>>
     where
-        S: FnMut() -> State,
-        F: Fn(&mut State, Request) -> Response,
-        F: Send + Sync,
-        State: Send,
+        S: labor::Socium<Request, Response>,
+        S::Proletarian: labor::Proletarian<Request, Response> + Send,
     {
         let res = scope(|s| {
             let handlers = self
@@ -379,12 +418,11 @@ where
                 .into_iter()
                 .enumerate()
                 .map(|(channel_id, processor)| {
-                    let f = &f;
                     let name = format!("Processing channel #{}", channel_id);
-                    let mut state = setup();
+                    let prolet = socium.construct_proletarian();
                     s.builder()
                         .name(name)
-                        .spawn(move |_| processor.run_loop(|request| f(&mut state, request)))
+                        .spawn(move |_| processor.run_loop(prolet))
                         .context(SpawnError { channel_id })
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -492,8 +530,9 @@ mod test {
             handle,
         } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
 
-        let processors =
-            std::thread::spawn(move || processors.run_in_parallel(|| (), |_, v| v.len()).unwrap());
+        let processors = std::thread::spawn(move || {
+            processors.run_in_parallel(|| |v: Vec<u8>| v.len()).unwrap()
+        });
         scope(|s| {
             for _ in 0..CLIENT_THREADS {
                 let client = client.clone();
