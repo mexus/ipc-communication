@@ -318,7 +318,8 @@ where
             should_block = false;
             match item {
                 Message::Quit { response_channel } => {
-                    response_channel.send(()).context(SendingQuitResponse)?;
+                    // Ignoring possible errors here.
+                    let _ = response_channel.send(());
                     break Ok(());
                 }
                 Message::Request {
@@ -326,7 +327,10 @@ where
                     response_channel,
                 } => {
                     let response = proletarian.process_request(request);
-                    response_channel.send(response).context(SendingResponse)?;
+                    if let Err(e) = response_channel.send(response).context(SendingResponse) {
+                        // Do not stop execution when sending a response fails.
+                        log::error!("Unable to send a response: {}", e);
+                    }
                 }
             }
         }
