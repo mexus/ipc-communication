@@ -158,6 +158,14 @@ impl Error {
             .unwrap_or(false)
     }
 
+    /// Checks if the Error happened because the system was stopped.
+    pub fn has_stopped(&self) -> bool {
+        match self {
+            Error::StoppedSendingRequest | Error::StoppedReceivingResponse => true,
+            _ => false,
+        }
+    }
+
     /// Returns the underlying `ipc-channel` error, if any.
     pub fn ipc_error(&self) -> Option<&ipc_channel::ErrorKind> {
         match self {

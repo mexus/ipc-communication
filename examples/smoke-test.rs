@@ -62,7 +62,7 @@ where
         loop {
             let now = Instant::now();
             if now >= run_until {
-                break Ok(sent);
+                break;
             }
 
             let msg_len = msg_size_distr.sample(&mut rng).abs().round();
@@ -82,9 +82,14 @@ where
             }
             previous = Instant::now();
 
-            let response = ipc_client.make_request(channel_id, msg)?;
+            let response = match ipc_client.make_request(channel_id, msg) {
+                Ok(x) => x,
+                Err(e) if e.has_terminated() | e.has_stopped() => break,
+                Err(e) => return Err(e),
+            };
             assert_eq!(response.len(), msg_len);
         }
+        Ok(sent)
     })
 }
 
