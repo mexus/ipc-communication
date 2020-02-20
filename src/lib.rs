@@ -450,7 +450,7 @@ where
                 .enumerate()
                 .map(|(channel_id, processor)| {
                     let name = format!("Processing channel #{}", channel_id);
-                    let prolet = socium.construct_proletarian();
+                    let prolet = socium.construct_proletarian(channel_id);
                     s.builder()
                         .name(name)
                         .spawn(move |_| processor.run_loop(prolet))
@@ -556,7 +556,9 @@ mod test {
         } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
 
         let processors = std::thread::spawn(move || {
-            processors.run_in_parallel(|| |v: Vec<u8>| v.len()).unwrap()
+            processors
+                .run_in_parallel(|_channel_id| |v: Vec<_>| v.len())
+                .unwrap()
         });
         scope(|s| {
             for _ in 0..CLIENT_THREADS {
