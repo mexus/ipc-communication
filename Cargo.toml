@@ -1,6 +1,6 @@
 [package]
 name = "ipc-communication"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["mexus"]
 edition = "2018"
 description = "A client-server style convenience wrapper over servo/ipc-channel"
@@ -14,6 +14,8 @@ snafu = "0.6.2"
 
 ipc-channel = "0.13.0"
 crossbeam-utils = "0.7.0"
+
+parking_lot = "0.10.0"
 
 
 [dev-dependencies]

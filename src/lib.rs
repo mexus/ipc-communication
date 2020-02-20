@@ -4,6 +4,7 @@
 
 use crossbeam_utils::thread::scope;
 use ipc_channel::ipc::{channel, IpcReceiver, IpcSender};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{
@@ -442,7 +443,7 @@ where
     for<'de> Request: Serialize + Deserialize<'de> + Send,
     for<'de> Response: Serialize + Deserialize<'de> + Send,
 {
-    /// Runs all the underlying responses in separate thread each using a given closure.
+    /// Runs all the underlying responses in separate thread each using given socium.
     pub fn run_in_parallel<S>(
         self,
         mut socium: S,
@@ -462,6 +463,61 @@ where
                     s.builder()
                         .name(name)
                         .spawn(move |_| processor.run_loop(prolet))
+                        .context(SpawnError { channel_id })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let join_errors: Vec<_> = handlers
+                .into_iter()
+                .map(|handler| {
+                    let thread_name = handler
+                        .thread()
+                        .name()
+                        .unwrap_or("[unknown thread]")
+                        .to_string();
+                    let thread_name = &thread_name;
+                    handler
+                        .join()
+                        .context(ThreadPanic { thread_name })?
+                        .context(IpcError { thread_name })
+                })
+                .filter_map(|res| match res {
+                    Ok(()) => None,
+                    Err(e) => Some(e),
+                })
+                .collect();
+            Ok(join_errors)
+        })
+        .context(UnjoinedThreadPanic)??;
+        Ok(res)
+    }
+
+    /// Runs all the underlying responses in separate thread each using given socium.
+    ///
+    /// Like `run_in_parallel`, but can work with unsendable proletarians by wrapping the socium
+    /// into a mutex and sending a reference to it accross the threads.
+    pub fn run_in_parallel_unsend<S>(
+        self,
+        socium: S,
+    ) -> Result<Vec<ParallelRunError>, ParallelRunError>
+    where
+        S: labor::Socium<Request, Response> + Send,
+        S::Proletarian: labor::Proletarian<Request, Response>,
+    {
+        let socium = Mutex::new(socium);
+        let res = scope(|s| {
+            let handlers = self
+                .processors
+                .into_iter()
+                .enumerate()
+                .map(|(channel_id, processor)| {
+                    let name = format!("Processing channel #{}", channel_id);
+                    let socium = &socium;
+                    s.builder()
+                        .name(name)
+                        .spawn(move |_| {
+                            let prolet = socium.lock().construct_proletarian(channel_id);
+                            processor.run_loop(prolet)
+                        })
                         .context(SpawnError { channel_id })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
