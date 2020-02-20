@@ -234,7 +234,9 @@ where
         sender
             .send(Message::Request {
                 request,
-                response_channel,
+                // We clone the channel to keep its copy to ourselves in order to make sure the
+                // channel doesn't disappear before we get a chance to read data from it.
+                response_channel: response_channel.clone(),
             })
             .context(SendingRequest { channel_id })?;
         ensure!(

@@ -84,7 +84,7 @@ where
 
             let response = match ipc_client.make_request(channel_id, msg) {
                 Ok(x) => x,
-                Err(e) if e.has_terminated() | e.has_stopped() => break,
+                Err(e) if e.has_stopped() => break,
                 Err(e) => return Err(e),
             };
             assert_eq!(response.len(), msg_len);
