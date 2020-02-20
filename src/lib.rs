@@ -201,10 +201,8 @@ pub struct Client<Request, Response> {
 
 impl<Request, Response> Clone for Client<Request, Response>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
 {
     fn clone(&self) -> Self {
         Client {
@@ -216,10 +214,8 @@ where
 
 impl<Request, Response> Client<Request, Response>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
 {
     /// Sends a request to a given channel id and waits for a response.
     pub fn make_request(&self, channel_id: usize, request: Request) -> Result<Response, Error> {
@@ -352,22 +348,33 @@ pub struct ProcessorsHandle<Request, Response> {
     running: Arc<AtomicBool>,
 }
 
+impl<Request, Response> Clone for ProcessorsHandle<Request, Response>
+where
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
+{
+    fn clone(&self) -> Self {
+        ProcessorsHandle {
+            senders: self.senders.clone(),
+            running: self.running.clone(),
+        }
+    }
+}
+
 impl<Request, Response> ProcessorsHandle<Request, Response>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
 {
     /// Sends a stop signal to all the running processors and waits for them to receive the signal.
-    pub fn stop(self) -> Result<(), Vec<Error>> {
+    pub fn stop(&self) -> Result<(), Vec<Error>> {
         self.running.store(false, Ordering::SeqCst);
         let (quit_confirmation, quit_rcv) = channel::<()>()
             .context(QuitChannelInit)
             .map_err(|e| vec![e])?;
         let (success_cnt, mut errors) = self
             .senders
-            .into_iter()
+            .iter()
             .map(|sender| -> Result<(), Error> {
                 sender
                     .send(Message::Quit {
@@ -575,10 +582,8 @@ pub fn communication<Request, Response>(
     channels: usize,
 ) -> Result<Communication<Request, Response>, Error>
 where
-    Request: Serialize,
-    for<'de> Request: Deserialize<'de>,
-    Response: Serialize,
-    for<'de> Response: Deserialize<'de>,
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
 {
     let mut processors = Vec::with_capacity(channels);
     let mut senders = Vec::with_capacity(channels);
