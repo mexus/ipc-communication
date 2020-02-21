@@ -218,6 +218,7 @@ where
     for<'de> Response: Deserialize<'de> + Serialize,
 {
     /// Sends a request to a given channel id and waits for a response.
+    #[allow(clippy::redundant_clone)]
     pub fn make_request(&self, channel_id: usize, request: Request) -> Result<Response, Error> {
         let channels = self.senders.len();
         let sender = self.senders.get(channel_id).context(ChannelNotFound {
