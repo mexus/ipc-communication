@@ -1,6 +1,6 @@
 [package]
 name = "ipc-communication"
-version = "0.3.6"
+version = "0.4.0"
 authors = ["mexus"]
 edition = "2018"
 description = "A client-server style convenience wrapper over servo/ipc-channel"
@@ -15,7 +15,6 @@ snafu = "0.6.2"
 ipc-channel = "0.13.0"
 crossbeam-utils = "0.7.0"
 
-parking_lot = "0.10.0"
 log = "0.4.8"
 
 
@@ -27,6 +26,7 @@ nix = "0.17.0"
 structopt = "0.3.9"
 rand_distr = "0.2.2"
 humantime = "2.0.0"
+parking_lot = "0.10.0"
 
 [[bench]]
 name = "inter_thread"

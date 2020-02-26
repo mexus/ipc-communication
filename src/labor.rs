@@ -27,7 +27,7 @@ pub trait Socium<Request, Response> {
     type Proletarian: Proletarian<Request, Response>;
 
     /// Constructs an instance of a `Proletarian`.
-    fn construct_proletarian(&mut self, channel_id: usize) -> Self::Proletarian;
+    fn construct_proletarian(&self, channel_id: usize) -> Self::Proletarian;
 }
 
 impl<F: FnMut(Req) -> Resp, Req, Resp> Proletarian<Req, Resp> for F {
@@ -38,12 +38,12 @@ impl<F: FnMut(Req) -> Resp, Req, Resp> Proletarian<Req, Resp> for F {
 
 impl<F, P, Req, Resp> Socium<Req, Resp> for F
 where
-    F: FnMut(usize) -> P,
+    F: Fn(usize) -> P,
     P: Proletarian<Req, Resp>,
 {
     type Proletarian = P;
 
-    fn construct_proletarian(&mut self, channel_id: usize) -> Self::Proletarian {
+    fn construct_proletarian(&self, channel_id: usize) -> Self::Proletarian {
         (self)(channel_id)
     }
 }

@@ -143,9 +143,11 @@ fn main() -> Result<(), Error> {
         let _ = handle.stop();
     });
 
+    let rng = parking_lot::Mutex::new(rng);
+
     processors
         .run_in_parallel(|_channel_id| {
-            let mut rng = Xoshiro256PlusPlus::seed_from_u64(rng.gen());
+            let mut rng = Xoshiro256PlusPlus::seed_from_u64(rng.lock().gen());
             move |vec| {
                 let sleep_for = rng.gen_range(Duration::from_nanos(100), Duration::from_micros(1));
                 sleep(sleep_for);
