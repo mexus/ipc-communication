@@ -11,6 +11,7 @@ use std::{
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::{channel as inner_channel, Sender},
         Arc,
     },
 };
@@ -19,6 +20,17 @@ pub mod labor;
 mod panic_error;
 
 pub use panic_error::PanicError;
+
+#[derive(Clone, Debug)]
+struct ThreadGuard {
+    sender: Sender<()>,
+}
+
+impl Drop for ThreadGuard {
+    fn drop(&mut self) {
+        let _ = self.sender.send(());
+    }
+}
 
 /// IPC communication error.
 #[derive(Snafu, Debug)]
@@ -114,27 +126,6 @@ pub enum Error {
         source: ipc_channel::Error,
     },
 
-    /// Unable to send a `quit` request.
-    #[snafu(display("Unable to send a `quit` request: {}", source))]
-    SendingQuitRequest {
-        /// Source IPC error.
-        source: ipc_channel::Error,
-    },
-
-    /// Unable to send a response to a `quit` command.
-    #[snafu(display("Unable to send a response to a `quit` command: {}", source))]
-    SendingQuitResponse {
-        /// Source IPC error.
-        source: ipc_channel::Error,
-    },
-
-    /// Unable to receive a response to a `quit` command.
-    #[snafu(display("Unable to receive a response to a `quit` command: {}", source))]
-    ReceivingQuitResponse {
-        /// Source IPC error.
-        source: ipc_channel::Error,
-    },
-
     /// Unable to send a request because a system has stopped.
     #[snafu(display("Unable to send a request because a system has stopped"))]
     StoppedSendingRequest,
@@ -172,10 +163,7 @@ impl Error {
             Error::SendingRequest { source, .. }
             | Error::ReceivingResponse { source, .. }
             | Error::ReceivingRequest { source, .. }
-            | Error::SendingResponse { source, .. }
-            | Error::SendingQuitRequest { source, .. }
-            | Error::SendingQuitResponse { source, .. }
-            | Error::ReceivingQuitResponse { source, .. } => Some(source as &_),
+            | Error::SendingResponse { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -187,9 +175,7 @@ enum Message<Request, Response> {
         request: Request,
         response_channel: IpcSender<Response>,
     },
-    Quit {
-        response_channel: IpcSender<()>,
-    },
+    Quit,
 }
 
 /// A "client" capable of sending requests to processors.
@@ -315,11 +301,7 @@ where
             };
             should_block = false;
             match item {
-                Message::Quit { response_channel } => {
-                    // Ignoring possible errors here.
-                    let _ = response_channel.send(());
-                    break Ok(());
-                }
+                Message::Quit => break Ok(()),
                 Message::Request {
                     request,
                     response_channel,
@@ -340,6 +322,9 @@ where
 pub struct Processors<Request, Response> {
     /// The underlying processors.
     pub processors: Vec<Processor<Request, Response>>,
+
+    /// Processors handle.
+    handle: ProcessorsHandle<Request, Response>,
 }
 
 /// Processors handler.
@@ -367,40 +352,12 @@ where
     for<'de> Response: Deserialize<'de> + Serialize,
 {
     /// Sends a stop signal to all the running processors and waits for them to receive the signal.
-    pub fn stop(&self) -> Result<(), Vec<Error>> {
+    pub fn stop(&self) -> Result<(), Error> {
         self.running.store(false, Ordering::SeqCst);
-        let (quit_confirmation, quit_rcv) = channel::<()>()
-            .context(QuitChannelInit)
-            .map_err(|e| vec![e])?;
-        let (success_cnt, mut errors) = self
-            .senders
-            .iter()
-            .map(|sender| -> Result<(), Error> {
-                sender
-                    .send(Message::Quit {
-                        response_channel: quit_confirmation.clone(),
-                    })
-                    .context(SendingQuitRequest)?;
-                Ok(())
-            })
-            .fold((0usize, Vec::new()), |(mut acc, mut errors), res| {
-                match res {
-                    Ok(()) => acc += 1,
-                    Err(e) => errors.push(e),
-                }
-                (acc, errors)
-            });
-        let wait_errors =
-            (0..success_cnt).filter_map(|_| match quit_rcv.recv().context(ReceivingQuitResponse) {
-                Ok(()) => None,
-                Err(e) => Some(e),
-            });
-        errors.extend(wait_errors);
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
+        self.senders.iter().for_each(|sender| {
+            let _ = sender.send(Message::Quit);
+        });
+        Ok(())
     }
 }
 
@@ -463,22 +420,30 @@ where
         S::Proletarian: labor::Proletarian<Request, Response>,
     {
         let res = scope(|s| {
+            let (tx, rx) = inner_channel::<()>();
             let handlers = self
                 .processors
                 .into_iter()
                 .enumerate()
                 .map(|(channel_id, processor)| {
-                    let name = format!("Processing channel #{}", channel_id);
+                    let name = format!("Channel #{}", channel_id);
                     let socium = &socium;
+                    let tx = tx.clone();
                     s.builder()
                         .name(name)
                         .spawn(move |_| {
+                            let _guard = ThreadGuard { sender: tx };
                             let prolet = socium.construct_proletarian(channel_id);
                             processor.run_loop(prolet)
                         })
                         .context(SpawnError { channel_id })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+
+            // Wait for the first channel to end and then join 'em all!
+            let _ = rx.recv();
+            let _ = self.handle.stop();
+
             let join_errors: Vec<_> = handlers
                 .into_iter()
                 .map(|handler| {
@@ -549,7 +514,10 @@ where
         senders,
         running: Arc::clone(&running),
     };
-    let processors = Processors { processors };
+    let processors = Processors {
+        processors,
+        handle: handle.clone(),
+    };
     Ok(Communication {
         client,
         processors,
