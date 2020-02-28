@@ -3,6 +3,7 @@ name = "ipc-communication"
 version = "0.4.0"
 authors = ["mexus"]
 edition = "2018"
+repository = "https://github.com/mexus/ipc-communication"
 description = "A client-server style convenience wrapper over servo/ipc-channel"
 license = "MIT/Apache-2.0"
 
