@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use snafu::{ensure, OptionExt, ResultExt, Snafu};
 use std::{
     any::Any,
+    collections::HashMap,
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -173,15 +174,40 @@ impl Error {
 enum Message<Request, Response> {
     Request {
         request: Request,
-        response_channel: IpcSender<Response>,
+        respond_to: u64,
+    },
+    Register {
+        client_id: u64,
+        sender: IpcSender<Response>,
+    },
+    Unregister {
+        client_id: u64,
     },
     Quit,
 }
 
 /// A "client" capable of sending requests to processors.
-pub struct Client<Request, Response> {
+pub struct Client<Request, Response>
+where
+    Request: Serialize,
+    Response: Serialize,
+{
+    id: u64,
     senders: Vec<IpcSender<Message<Request, Response>>>,
+    receiver: IpcReceiver<Response>,
     running: Arc<AtomicBool>,
+}
+
+impl<Request, Response> Drop for Client<Request, Response>
+where
+    Request: Serialize,
+    Response: Serialize,
+{
+    fn drop(&mut self) {
+        for server_sender in &self.senders {
+            let _ = server_sender.send(Message::Unregister { client_id: self.id });
+        }
+    }
 }
 
 impl<Request, Response> Clone for Client<Request, Response>
@@ -190,10 +216,7 @@ where
     for<'de> Response: Deserialize<'de> + Serialize,
 {
     fn clone(&self) -> Self {
-        Client {
-            senders: self.senders.clone(),
-            running: Arc::clone(&self.running),
-        }
+        Client::new(self.senders.clone(), &self.running)
     }
 }
 
@@ -202,6 +225,26 @@ where
     for<'de> Request: Deserialize<'de> + Serialize,
     for<'de> Response: Deserialize<'de> + Serialize,
 {
+    fn new(senders: Vec<IpcSender<Message<Request, Response>>>, running: &Arc<AtomicBool>) -> Self {
+        let new_id = rand::Rng::gen(&mut rand::thread_rng());
+        let (sender, receiver) =
+            channel().expect("Can't initialize a sender-receiver pair; shouldn't fail");
+        for server_sender in &senders {
+            server_sender
+                .send(Message::Register {
+                    client_id: new_id,
+                    sender: sender.clone(),
+                })
+                .expect("Unable to register a client");
+        }
+        Client {
+            id: new_id,
+            senders,
+            running: Arc::clone(running),
+            receiver,
+        }
+    }
+
     /// Sends a request to a given channel id and waits for a response.
     #[allow(clippy::redundant_clone)]
     pub fn make_request(&self, channel_id: usize, request: Request) -> Result<Response, Error> {
@@ -210,22 +253,21 @@ where
             channel_id,
             channels,
         })?;
-        let (response_channel, rcv) =
-            channel::<Response>().context(ResponseChannelInit { channel_id })?;
         ensure!(self.running.load(Ordering::SeqCst), StoppedSendingRequest);
         sender
             .send(Message::Request {
                 request,
-                // We clone the channel to keep its copy to ourselves in order to make sure the
-                // channel doesn't disappear before we get a chance to read data from it.
-                response_channel: response_channel.clone(),
+                respond_to: self.id,
             })
             .context(SendingRequest { channel_id })?;
         ensure!(
             self.running.load(Ordering::SeqCst),
             StoppedReceivingResponse
         );
-        rcv.recv().context(ReceivingResponse { channel_id })
+        self.receiver
+            .recv()
+            .context(ReceivingResponse { channel_id })
+        // rcv.recv().context(ReceivingResponse { channel_id })
     }
 
     /// Returns the amount of channels.
@@ -282,6 +324,7 @@ where
         P: labor::Proletarian<Request, Response>,
     {
         let mut should_block = false;
+        let mut clients = HashMap::<u64, IpcSender<Response>>::new();
         loop {
             let item = if should_block {
                 self.receiver.recv().context(ReceivingRequest)?
@@ -304,12 +347,26 @@ where
                 Message::Quit => break Ok(()),
                 Message::Request {
                     request,
-                    response_channel,
+                    respond_to,
                 } => {
-                    let response = proletarian.process_request(request);
-                    if let Err(e) = response_channel.send(response).context(SendingResponse) {
-                        // Do not stop execution when sending a response fails.
-                        log::error!("Unable to send a response: {}", e);
+                    if let Some(response_channel) = clients.get(&respond_to) {
+                        let response = proletarian.process_request(request);
+                        if let Err(e) = response_channel.send(response).context(SendingResponse) {
+                            // Do not stop execution when sending a response fails.
+                            log::error!("Unable to send a response: {}", e);
+                        }
+                    } else {
+                        log::error!("Unknown client with id {}", respond_to);
+                    }
+                }
+                Message::Register { client_id, sender } => {
+                    if clients.insert(client_id, sender).is_some() {
+                        log::warn!("Client {} was already registered..", client_id);
+                    }
+                }
+                Message::Unregister { client_id } => {
+                    if clients.remove(&client_id).is_none() {
+                        log::warn!("Client {} is not registered..", client_id);
                     }
                 }
             }
@@ -471,7 +528,11 @@ where
 }
 
 /// A helper structure that contains communication objects.
-pub struct Communication<Request, Response> {
+pub struct Communication<Request, Response>
+where
+    Request: Serialize,
+    Response: Serialize,
+{
     /// A clonable client.
     pub client: Client<Request, Response>,
 
@@ -510,10 +571,7 @@ where
         senders: senders.clone(),
         running: Arc::clone(&running),
     };
-    let client = Client {
-        senders,
-        running: Arc::clone(&running),
-    };
+    let client = Client::new(senders, &running);
     let processors = Processors {
         processors,
         handle: handle.clone(),

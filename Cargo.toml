@@ -1,6 +1,6 @@
 [package]
 name = "ipc-communication"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["mexus"]
 edition = "2018"
 repository = "https://github.com/mexus/ipc-communication"
@@ -18,9 +18,9 @@ crossbeam-utils = "0.7.0"
 
 log = "0.4.8"
 
+rand = "0.7.3"
 
 [dev-dependencies]
-rand = "0.7.3"
 rand_xoshiro = "0.4.0"
 criterion = "0.3"
 nix = "0.17.0"
