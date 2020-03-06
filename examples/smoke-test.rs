@@ -41,7 +41,7 @@ struct Config {
 }
 
 fn run_client<R, D>(
-    ipc_client: ipc_communication::Client<Vec<u8>, Vec<u8>>,
+    ipc_client_builder: ipc_communication::ClientBuilder<Vec<u8>, Vec<u8>>,
     mut rng: R,
     msg_size_distr: D,
     run_until: Instant,
@@ -74,6 +74,7 @@ where
 
             sent += msg_len;
             let msg: Vec<u8> = (&mut rng).sample_iter(Standard).take(msg_len).collect();
+            let ipc_client = ipc_client_builder.build();
             let channel_id = rng.gen_range(0, ipc_client.channels());
 
             let to_sleep = now - previous;
@@ -119,7 +120,7 @@ fn main() -> Result<(), Error> {
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(cfg.seed);
 
     let Communication {
-        client: ipc_client,
+        client_builder: ipc_client_builder,
         processors,
         handle,
     } = communication::<Vec<u8>, Vec<u8>>(cfg.channels).context(Ipc)?;
@@ -130,7 +131,7 @@ fn main() -> Result<(), Error> {
             let seed = rng.gen();
             let rng = Xoshiro256PlusPlus::seed_from_u64(seed);
             run_client(
-                ipc_client.clone(),
+                ipc_client_builder.clone(),
                 rng,
                 msg_size_distr,
                 run_until,

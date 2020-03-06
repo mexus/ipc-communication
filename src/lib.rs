@@ -186,6 +186,40 @@ enum Message<Request, Response> {
     Quit,
 }
 
+/// An immutable clients builder.
+pub struct ClientBuilder<Request, Response>
+where
+    Request: Serialize,
+    Response: Serialize,
+{
+    senders: Vec<IpcSender<Message<Request, Response>>>,
+    running: Arc<AtomicBool>,
+}
+
+impl<Request, Response> Clone for ClientBuilder<Request, Response>
+where
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
+{
+    fn clone(&self) -> Self {
+        Self {
+            senders: self.senders.clone(),
+            running: Arc::clone(&self.running),
+        }
+    }
+}
+
+impl<Request, Response> ClientBuilder<Request, Response>
+where
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
+{
+    /// Builds a client.
+    pub fn build(&self) -> Client<Request, Response> {
+        Client::new(self.senders.clone(), &self.running)
+    }
+}
+
 /// A "client" capable of sending requests to processors.
 pub struct Client<Request, Response>
 where
@@ -533,8 +567,8 @@ where
     Request: Serialize,
     Response: Serialize,
 {
-    /// A clonable client.
-    pub client: Client<Request, Response>,
+    /// A clonable client builder.
+    pub client_builder: ClientBuilder<Request, Response>,
 
     /// A processors container.
     pub processors: Processors<Request, Response>,
@@ -571,13 +605,13 @@ where
         senders: senders.clone(),
         running: Arc::clone(&running),
     };
-    let client = Client::new(senders, &running);
+    let client_builder = ClientBuilder { senders, running };
     let processors = Processors {
         processors,
         handle: handle.clone(),
     };
     Ok(Communication {
-        client,
+        client_builder,
         processors,
         handle,
     })
@@ -596,7 +630,7 @@ mod test {
         const MESSAGES_PER_CLIENT: usize = 100;
 
         let Communication {
-            client,
+            client_builder,
             processors,
             handle,
         } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
@@ -608,7 +642,7 @@ mod test {
         });
         scope(|s| {
             for _ in 0..CLIENT_THREADS {
-                let client = client.clone();
+                let client_builder = client_builder.clone();
                 s.spawn(move |_| {
                     let mut rng = thread_rng();
                     for _ in 0..MESSAGES_PER_CLIENT {
@@ -616,6 +650,7 @@ mod test {
                         let length = rng.gen_range(0, MAX_LEN);
                         let data = rng.sample_iter(Standard).take(length).collect();
 
+                        let client = client_builder.build();
                         let response = client.make_request(channel_id, data).unwrap();
                         assert_eq!(response, length);
                     }

@@ -18,7 +18,7 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     const CHANNELS: usize = 4;
     let Communication {
-        client,
+        client_builder,
         processors,
         handle,
     } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
@@ -49,6 +49,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Throughput");
     group.throughput(Throughput::Bytes(data_size as u64));
     group.bench_function("communication", |bencher| {
+        let client = client_builder.build();
         bencher.iter_batched(
             || data.clone(),
             |data| {
@@ -67,13 +68,14 @@ fn criterion_benchmark(c: &mut Criterion) {
         let mut group = c.benchmark_group(format!("Latency at {}", size));
         group.bench_function("ping-threads", |bencher| {
             let Communication {
-                client,
+                client_builder,
                 processors,
                 handle,
             } = communication::<Vec<u8>, Vec<u8>>(1).unwrap();
 
             let processors =
                 std::thread::spawn(move || processors.run_in_parallel(|_| identity).unwrap());
+            let client = client_builder.build();
             bencher.iter_batched(
                 || (&mut rng).sample_iter(Standard).take(size).collect(),
                 |vec| client.make_request(0, vec).unwrap(),
@@ -84,7 +86,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         });
         group.bench_function("ping-processes", |bencher| {
             let Communication {
-                client,
+                client_builder,
                 processors,
                 handle,
             } = communication::<Vec<u8>, Vec<u8>>(1).unwrap();
@@ -97,6 +99,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 }
             };
 
+            let client = client_builder.build();
             bencher.iter_batched(
                 || (&mut rng).sample_iter(Standard).take(size).collect(),
                 |vec| client.make_request(0, vec).unwrap(),
