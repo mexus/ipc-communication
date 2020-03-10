@@ -15,6 +15,7 @@ snafu = "0.6.2"
 
 ipc-channel = "0.13.0"
 crossbeam-utils = "0.7.0"
+crossbeam-channel = "0.4.2"
 
 log = "0.4.8"
 
@@ -24,7 +25,7 @@ rand = "0.7.3"
 rand_xoshiro = "0.4.0"
 criterion = "0.3"
 nix = "0.17.0"
-structopt = "0.3.9"
+structopt = "0.3.11"
 rand_distr = "0.2.2"
 humantime = "2.0.0"
 parking_lot = "0.10.0"

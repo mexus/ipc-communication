@@ -35,7 +35,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 .sample_iter(Standard)
                 .take(len)
                 .collect::<Vec<u8>>();
-            let channel_id = rng.gen_range(0, CHANNELS);
+            let channel_id = rng.gen_range(0, CHANNELS as u64);
             (channel_id, data)
         })
         .collect::<Vec<_>>();

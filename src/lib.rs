@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+use crossbeam_channel::{unbounded, Sender};
 use crossbeam_utils::thread::scope;
 use ipc_channel::ipc::{channel, IpcReceiver, IpcSender};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,6 @@ use std::{
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel as inner_channel, Sender},
         Arc,
     },
 };
@@ -36,6 +36,16 @@ impl Drop for ThreadGuard {
 /// IPC communication error.
 #[derive(Snafu, Debug)]
 pub enum Error {
+    /// Unable to initialize communication channel.
+    #[snafu(display("Unable to initialize communication channel for {} channels", channels))]
+    MainChannelInit {
+        /// Source IPC error.
+        source: io::Error,
+
+        /// Channels amount.
+        channels: usize,
+    },
+
     /// Unable to initialize channels.
     #[snafu(display(
         "Unable to initialize {} channels (at channel #{}): {}",
@@ -96,7 +106,7 @@ pub enum Error {
         source: ipc_channel::Error,
 
         /// Channel ID.
-        channel_id: usize,
+        channel_id: u64,
     },
 
     /// Unable to receiver a response on a channel.
@@ -110,20 +120,23 @@ pub enum Error {
         source: ipc_channel::Error,
 
         /// Channel ID.
-        channel_id: usize,
+        channel_id: u64,
     },
 
     /// Unable to receive a request on a channel.
     #[snafu(display("Unable to receive a request on a channel: {}", source))]
     ReceivingRequest {
         /// Source IPC error.
-        source: ipc_channel::Error,
+        source: crossbeam_channel::RecvError,
     },
 
     /// Unable to send a response on a channel.
-    #[snafu(display("Unable to send a response on a channel: {}", source))]
+    #[snafu(display("Unable to send a response to client {}: {}", client_id, source))]
     SendingResponse {
-        /// Source IPC error.
+        /// Client's ID.
+        client_id: u64,
+
+        /// IPC error.
         source: ipc_channel::Error,
     },
 
@@ -134,6 +147,20 @@ pub enum Error {
     /// Unable to receive a response because a system has stopped.
     #[snafu(display("Unable to receive a response because a system has stopped"))]
     StoppedReceivingResponse,
+
+    /// Error while receiving a message on a global IPC channel.
+    #[snafu(display("Error while receiving a message on a global IPC channel: {}", source))]
+    RouterReceive {
+        /// Source IPC error.
+        source: ipc_channel::Error,
+    },
+
+    /// Unable to send a request to a processor.
+    #[snafu(display("Unable to send a request to a processor on channel #{}", channel_id))]
+    RouterSend {
+        /// Channel id.
+        channel_id: u64,
+    },
 }
 
 impl Error {
@@ -163,16 +190,15 @@ impl Error {
         match self {
             Error::SendingRequest { source, .. }
             | Error::ReceivingResponse { source, .. }
-            | Error::ReceivingRequest { source, .. }
             | Error::SendingResponse { source, .. } => Some(source),
             _ => None,
         }
     }
 }
-
 #[derive(Serialize, Deserialize)]
 enum Message<Request, Response> {
     Request {
+        channel_id: u64,
         request: Request,
         respond_to: u64,
     },
@@ -186,13 +212,24 @@ enum Message<Request, Response> {
     Quit,
 }
 
+#[derive(Serialize, Deserialize)]
+enum InternalRequest<Request, Response> {
+    Normal {
+        request: Request,
+        respond_to: u64,
+        respond_channel: IpcSender<Response>,
+    },
+    Quit,
+}
+
 /// An immutable clients builder.
 pub struct ClientBuilder<Request, Response>
 where
     Request: Serialize,
     Response: Serialize,
 {
-    senders: Vec<IpcSender<Message<Request, Response>>>,
+    sender: IpcSender<Message<Request, Response>>,
+    total_channels: u64,
     running: Arc<AtomicBool>,
 }
 
@@ -203,8 +240,9 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            senders: self.senders.clone(),
+            sender: self.sender.clone(),
             running: Arc::clone(&self.running),
+            total_channels: self.total_channels,
         }
     }
 }
@@ -216,7 +254,7 @@ where
 {
     /// Builds a client.
     pub fn build(&self) -> Client<Request, Response> {
-        Client::new(self.senders.clone(), &self.running)
+        Client::new(self.sender.clone(), &self.running, self.total_channels)
     }
 }
 
@@ -227,7 +265,8 @@ where
     Response: Serialize,
 {
     id: u64,
-    senders: Vec<IpcSender<Message<Request, Response>>>,
+    total_channels: u64,
+    sender: IpcSender<Message<Request, Response>>,
     receiver: IpcReceiver<Response>,
     running: Arc<AtomicBool>,
 }
@@ -238,9 +277,7 @@ where
     Response: Serialize,
 {
     fn drop(&mut self) {
-        for server_sender in &self.senders {
-            let _ = server_sender.send(Message::Unregister { client_id: self.id });
-        }
+        let _ = self.sender.send(Message::Unregister { client_id: self.id });
     }
 }
 
@@ -250,7 +287,7 @@ where
     for<'de> Response: Deserialize<'de> + Serialize,
 {
     fn clone(&self) -> Self {
-        Client::new(self.senders.clone(), &self.running)
+        Client::new(self.sender.clone(), &self.running, self.total_channels)
     }
 }
 
@@ -259,37 +296,41 @@ where
     for<'de> Request: Deserialize<'de> + Serialize,
     for<'de> Response: Deserialize<'de> + Serialize,
 {
-    fn new(senders: Vec<IpcSender<Message<Request, Response>>>, running: &Arc<AtomicBool>) -> Self {
+    fn new(
+        server_sender: IpcSender<Message<Request, Response>>,
+        running: &Arc<AtomicBool>,
+        total_channels: u64,
+    ) -> Self {
         let new_id = rand::Rng::gen(&mut rand::thread_rng());
         let (sender, receiver) =
             channel().expect("Can't initialize a sender-receiver pair; shouldn't fail");
-        for server_sender in &senders {
-            server_sender
-                .send(Message::Register {
-                    client_id: new_id,
-                    sender: sender.clone(),
-                })
-                .expect("Unable to register a client");
-        }
+        server_sender
+            .send(Message::Register {
+                client_id: new_id,
+                sender: sender.clone(),
+            })
+            .expect("Unable to register a client");
         Client {
             id: new_id,
-            senders,
+            sender: server_sender,
             running: Arc::clone(running),
             receiver,
+            total_channels,
         }
+    }
+
+    /// Returns the amount of available channels.
+    pub fn total_channels(&self) -> u64 {
+        self.total_channels
     }
 
     /// Sends a request to a given channel id and waits for a response.
     #[allow(clippy::redundant_clone)]
-    pub fn make_request(&self, channel_id: usize, request: Request) -> Result<Response, Error> {
-        let channels = self.senders.len();
-        let sender = self.senders.get(channel_id).context(ChannelNotFound {
-            channel_id,
-            channels,
-        })?;
+    pub fn make_request(&self, channel_id: u64, request: Request) -> Result<Response, Error> {
         ensure!(self.running.load(Ordering::SeqCst), StoppedSendingRequest);
-        sender
+        self.sender
             .send(Message::Request {
+                channel_id,
                 request,
                 respond_to: self.id,
             })
@@ -303,16 +344,11 @@ where
             .context(ReceivingResponse { channel_id })
         // rcv.recv().context(ReceivingResponse { channel_id })
     }
-
-    /// Returns the amount of channels.
-    pub fn channels(&self) -> usize {
-        self.senders.len()
-    }
 }
 
 /// Requests processor.
 pub struct Processor<Request, Response> {
-    receiver: IpcReceiver<Message<Request, Response>>,
+    receiver: crossbeam_channel::Receiver<InternalRequest<Request, Response>>,
 }
 
 /// A result returned by a "loafer".
@@ -325,22 +361,18 @@ pub enum LoaferResult {
     CallMeAgain,
 }
 
-fn is_would_block(e: &ipc_channel::Error) -> bool {
-    if let ipc_channel::ErrorKind::Io(io) = &e as &_ {
-        io.kind() == std::io::ErrorKind::WouldBlock
-    } else {
-        false
-    }
-}
-
-fn maybe_message<T>(rcv: &IpcReceiver<T>) -> Result<Option<T>, ipc_channel::Error>
+fn maybe_message<T>(
+    rcv: &crossbeam_channel::Receiver<T>,
+) -> Result<Option<T>, crossbeam_channel::RecvError>
 where
     for<'de> T: Deserialize<'de> + Serialize,
 {
     match rcv.try_recv() {
         Ok(item) => Ok(Some(item)),
-        Err(e) if is_would_block(&e) => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => match e {
+            crossbeam_channel::TryRecvError::Empty => Ok(None),
+            crossbeam_channel::TryRecvError::Disconnected => Err(crossbeam_channel::RecvError),
+        },
     }
 }
 
@@ -358,7 +390,6 @@ where
         P: labor::Proletarian<Request, Response>,
     {
         let mut should_block = false;
-        let mut clients = HashMap::<u64, IpcSender<Response>>::new();
         loop {
             let item = if should_block {
                 self.receiver.recv().context(ReceivingRequest)?
@@ -378,29 +409,18 @@ where
             };
             should_block = false;
             match item {
-                Message::Quit => break Ok(()),
-                Message::Request {
+                InternalRequest::Quit => break Ok(()),
+                InternalRequest::Normal {
                     request,
                     respond_to,
+                    respond_channel,
                 } => {
-                    if let Some(response_channel) = clients.get(&respond_to) {
-                        let response = proletarian.process_request(request);
-                        if let Err(e) = response_channel.send(response).context(SendingResponse) {
-                            // Do not stop execution when sending a response fails.
-                            log::error!("Unable to send a response: {}", e);
-                        }
-                    } else {
-                        log::error!("Unknown client with id {}", respond_to);
-                    }
-                }
-                Message::Register { client_id, sender } => {
-                    if clients.insert(client_id, sender).is_some() {
-                        log::warn!("Client {} was already registered..", client_id);
-                    }
-                }
-                Message::Unregister { client_id } => {
-                    if clients.remove(&client_id).is_none() {
-                        log::warn!("Client {} is not registered..", client_id);
+                    let response = proletarian.process_request(request);
+                    if let Err(e) = respond_channel.send(response).context(SendingResponse {
+                        client_id: respond_to,
+                    }) {
+                        // Do not stop execution when sending a response fails.
+                        log::error!("Unable to send a response: {}", e);
                     }
                 }
             }
@@ -414,13 +434,16 @@ pub struct Processors<Request, Response> {
     /// The underlying processors.
     pub processors: Vec<Processor<Request, Response>>,
 
+    /// Requests router.
+    pub router: Router<Request, Response>,
+
     /// Processors handle.
     handle: ProcessorsHandle<Request, Response>,
 }
 
 /// Processors handler.
 pub struct ProcessorsHandle<Request, Response> {
-    senders: Vec<IpcSender<Message<Request, Response>>>,
+    sender: IpcSender<Message<Request, Response>>,
     running: Arc<AtomicBool>,
 }
 
@@ -431,7 +454,7 @@ where
 {
     fn clone(&self) -> Self {
         ProcessorsHandle {
-            senders: self.senders.clone(),
+            sender: self.sender.clone(),
             running: self.running.clone(),
         }
     }
@@ -445,9 +468,7 @@ where
     /// Sends a stop signal to all the running processors and waits for them to receive the signal.
     pub fn stop(&self) -> Result<(), Error> {
         self.running.store(false, Ordering::SeqCst);
-        self.senders.iter().for_each(|sender| {
-            let _ = sender.send(Message::Quit);
-        });
+        let _ = self.sender.send(Message::Quit);
         Ok(())
     }
 }
@@ -497,6 +518,13 @@ pub enum ParallelRunError {
         /// Spawn I/O error.
         source: io::Error,
     },
+
+    /// Can't spawn a router thread.
+    #[snafu(display("Failed to spawn a thread for router: {}", source))]
+    RouterSpawn {
+        /// Spawn I/O error.
+        source: io::Error,
+    },
 }
 
 impl<Request, Response> Processors<Request, Response>
@@ -511,7 +539,19 @@ where
         S::Proletarian: labor::Proletarian<Request, Response>,
     {
         let res = scope(|s| {
-            let (tx, rx) = inner_channel::<()>();
+            let (tx, rx) = unbounded::<()>();
+            // let router_handler = self.router.route().context(RouterError)?;
+            let router_handler = {
+                let tx = tx.clone();
+                let router = self.router;
+                s.builder()
+                    .name("Router".to_string())
+                    .spawn(move |_| {
+                        let _guard = ThreadGuard { sender: tx };
+                        router.route()
+                    })
+                    .context(RouterSpawn)
+            };
             let handlers = self
                 .processors
                 .into_iter()
@@ -529,6 +569,7 @@ where
                         })
                         .context(SpawnError { channel_id })
                 })
+                .chain(std::iter::once(router_handler))
                 .collect::<Result<Vec<_>, _>>()?;
 
             // Wait for the first channel to end and then join 'em all!
@@ -592,29 +633,105 @@ where
 {
     let mut processors = Vec::with_capacity(channels);
     let mut senders = Vec::with_capacity(channels);
-    for channel_id in 0..channels {
-        let (sender, receiver) = channel().context(ChannelsInit {
-            channel_id,
-            channels,
-        })?;
+
+    let (ipc_sender, ipc_receiver) = ipc_channel::ipc::channel::<Message<Request, Response>>()
+        .context(MainChannelInit { channels })?;
+
+    for _channel_id in 0..channels {
+        let (sender, receiver) = unbounded();
         processors.push(Processor { receiver });
         senders.push(sender);
     }
+
     let running = Arc::new(AtomicBool::new(true));
     let handle = ProcessorsHandle {
-        senders: senders.clone(),
+        sender: ipc_sender.clone(),
         running: Arc::clone(&running),
     };
-    let client_builder = ClientBuilder { senders, running };
+    let client_builder = ClientBuilder {
+        sender: ipc_sender,
+        running,
+        total_channels: channels as u64,
+    };
+    let router = Router {
+        channels: senders,
+        ipc_receiver,
+    };
     let processors = Processors {
         processors,
         handle: handle.clone(),
+        router,
     };
     Ok(Communication {
         client_builder,
         processors,
         handle,
     })
+}
+
+/// Routs requests from IPC to internal processors.
+pub struct Router<Request, Response> {
+    ipc_receiver: IpcReceiver<Message<Request, Response>>,
+    channels: Vec<Sender<InternalRequest<Request, Response>>>,
+}
+
+impl<Request, Response> Router<Request, Response>
+where
+    for<'de> Request: Deserialize<'de> + Serialize,
+    for<'de> Response: Deserialize<'de> + Serialize,
+{
+    /// Starts routing.
+    pub fn route(&self) -> Result<(), Error> {
+        let mut clients = HashMap::<u64, IpcSender<Response>>::new();
+
+        loop {
+            match self.ipc_receiver.recv().context(RouterReceive)? {
+                Message::Quit => {
+                    for snd in &self.channels {
+                        let _ = snd.send(InternalRequest::Quit);
+                    }
+                    break;
+                }
+                Message::Unregister { client_id } => {
+                    if clients.remove(&client_id).is_none() {
+                        log::error!("Client #{} wasn't registered!", client_id);
+                    }
+                }
+                Message::Register { client_id, sender } => {
+                    if clients.insert(client_id, sender).is_some() {
+                        log::error!("A client #{} was alreay registered!", client_id);
+                    }
+                }
+                Message::Request {
+                    channel_id,
+                    request,
+                    respond_to,
+                } => {
+                    if let Some(respond_channel) = clients.get(&respond_to) {
+                        if let Some(channel) = self.channels.get(channel_id as usize) {
+                            channel
+                                .send(InternalRequest::Normal {
+                                    request,
+                                    respond_to,
+                                    respond_channel: respond_channel.clone(),
+                                })
+                                .ok()
+                                .context(RouterSend { channel_id })?;
+                        } else {
+                            log::error!(
+                                "Received a request from a client #{} on an unknown channel #{}",
+                                respond_to,
+                                channel_id
+                            );
+                        }
+                    } else {
+                        log::error!("Received a request from an unknown client #{}", respond_to);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -633,7 +750,7 @@ mod test {
             client_builder,
             processors,
             handle,
-        } = communication::<Vec<u8>, usize>(CHANNELS).unwrap();
+        } = communication::<Vec<u8>, _>(CHANNELS).unwrap();
 
         let processors = std::thread::spawn(move || {
             processors
@@ -646,7 +763,7 @@ mod test {
                 s.spawn(move |_| {
                     let mut rng = thread_rng();
                     for _ in 0..MESSAGES_PER_CLIENT {
-                        let channel_id = rng.gen_range(0, CHANNELS);
+                        let channel_id = rng.gen_range(0, CHANNELS as u64);
                         let length = rng.gen_range(0, MAX_LEN);
                         let data = rng.sample_iter(Standard).take(length).collect();
 

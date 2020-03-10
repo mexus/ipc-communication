@@ -75,7 +75,7 @@ where
             sent += msg_len;
             let msg: Vec<u8> = (&mut rng).sample_iter(Standard).take(msg_len).collect();
             let ipc_client = ipc_client_builder.build();
-            let channel_id = rng.gen_range(0, ipc_client.channels());
+            let channel_id = rng.gen_range(0, ipc_client.total_channels());
 
             let to_sleep = now - previous;
             if to_sleep > MIN_SLEEP {
