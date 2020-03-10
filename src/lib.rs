@@ -17,9 +17,11 @@ use std::{
     },
 };
 
+pub mod ipc_error;
 pub mod labor;
 mod panic_error;
 
+use ipc_error::IpcErrorWrapper;
 pub use panic_error::PanicError;
 
 #[derive(Clone, Debug)]
@@ -117,7 +119,8 @@ pub enum Error {
     ))]
     ReceivingResponse {
         /// Source IPC error.
-        source: ipc_channel::Error,
+        #[snafu(source(from(ipc_channel::ipc::IpcError, From::from)))]
+        source: IpcErrorWrapper,
 
         /// Channel ID.
         channel_id: u64,
@@ -152,7 +155,8 @@ pub enum Error {
     #[snafu(display("Error while receiving a message on a global IPC channel: {}", source))]
     RouterReceive {
         /// Source IPC error.
-        source: ipc_channel::Error,
+        #[snafu(source(from(ipc_channel::ipc::IpcError, From::from)))]
+        source: IpcErrorWrapper,
     },
 
     /// Unable to send a request to a processor.
@@ -165,15 +169,9 @@ pub enum Error {
 
 impl Error {
     /// Checks if the other end has terminated.
-    pub fn has_terminated(&self) -> bool {
+    pub fn is_disconnected(&self) -> bool {
         self.ipc_error()
-            .map(|source| {
-                if let ipc_channel::ErrorKind::Io(io) = source {
-                    io.kind() == std::io::ErrorKind::BrokenPipe
-                } else {
-                    false
-                }
-            })
+            .map(IpcErrorWrapper::is_disconnected)
             .unwrap_or(false)
     }
 
@@ -186,11 +184,11 @@ impl Error {
     }
 
     /// Returns the underlying `ipc-channel` error, if any.
-    pub fn ipc_error(&self) -> Option<&ipc_channel::ErrorKind> {
+    pub fn ipc_error(&self) -> Option<&IpcErrorWrapper> {
         match self {
-            Error::SendingRequest { source, .. }
-            | Error::ReceivingResponse { source, .. }
-            | Error::SendingResponse { source, .. } => Some(source),
+            // Error::SendingRequest { source, .. }
+            Error::ReceivingResponse { source, .. } => Some(source),
+            // | Error::SendingResponse { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -342,7 +340,6 @@ where
         self.receiver
             .recv()
             .context(ReceivingResponse { channel_id })
-        // rcv.recv().context(ReceivingResponse { channel_id })
     }
 }
 

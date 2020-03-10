@@ -13,7 +13,7 @@ license = "MIT/Apache-2.0"
 serde = { version = "1", features = [ "derive" ] }
 snafu = "0.6.2"
 
-ipc-channel = "0.13.0"
+ipc-channel = "0.14.0"
 crossbeam-utils = "0.7.0"
 crossbeam-channel = "0.4.2"
 
